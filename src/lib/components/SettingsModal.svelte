@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import PermissionControls from "./PermissionControls.svelte";
 
   interface VaultConfig {
     vault_path: string;
@@ -10,6 +11,32 @@
     path: string;
     is_empty: boolean;
     exists: boolean;
+    has_nexus_folder: boolean;
+    database_exists: boolean;
+  }
+
+  interface Permissions {
+    share_with_ai: boolean;
+    share_with_cloud: boolean;
+    read_only: boolean;
+    expires_at: string | null;
+  }
+
+  interface VaultObject {
+    id: number;
+    schema_name: string;
+    content: any;
+    permissions: Permissions;
+    file_path: string | null;
+    updated_at: string;
+    created_at: string;
+  }
+
+  interface SyncStatus {
+    is_syncing: boolean;
+    last_sync: string | null;
+    pending_changes: number;
+    errors: string[];
   }
 
   let { isOpen = $bindable(), onVaultChanged } = $props<{
@@ -17,12 +44,23 @@
     onVaultChanged?: () => void;
   }>();
 
-  let activeTab = $state<"vault" | "general">("vault");
+  let activeTab = $state<"vault" | "permissions" | "general">("vault");
   let currentVault = $state<VaultConfig | null>(null);
   let isLoading = $state(false);
   let selectedPath = $state("");
   let directoryInfo = $state<VaultInfo | null>(null);
   let showWarning = $state(false);
+  
+  // Permissions tab state
+  let vaultObjects = $state<VaultObject[]>([]);
+  let syncStatus = $state<SyncStatus | null>(null);
+  let permissionsLoading = $state(false);
+  let permissionStats = $state({
+    total: 0,
+    aiShared: 0,
+    cloudShared: 0,
+    readOnly: 0
+  });
 
   // Load current vault config when modal opens
   $effect(() => {
@@ -40,6 +78,47 @@
       console.error("Failed to load vault config:", error);
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function loadPermissionsData() {
+    if (!currentVault) return;
+    
+    try {
+      permissionsLoading = true;
+      
+      // Load all vault objects
+      const objects = await invoke<VaultObject[]>("get_all_vault_objects");
+      vaultObjects = objects;
+      
+      // Load sync status
+      const status = await invoke<SyncStatus>("get_sync_status");
+      syncStatus = status;
+      
+      // Calculate stats
+      updatePermissionStats();
+      
+    } catch (error) {
+      console.error("Failed to load permissions data:", error);
+    } finally {
+      permissionsLoading = false;
+    }
+  }
+
+  function updatePermissionStats() {
+    permissionStats = {
+      total: vaultObjects.length,
+      aiShared: vaultObjects.filter(obj => obj.permissions.share_with_ai).length,
+      cloudShared: vaultObjects.filter(obj => obj.permissions.share_with_cloud).length,
+      readOnly: vaultObjects.filter(obj => obj.permissions.read_only).length
+    };
+  }
+
+  async function switchTab(newTab: "vault" | "permissions" | "general") {
+    activeTab = newTab;
+    
+    if (newTab === "permissions" && currentVault && vaultObjects.length === 0) {
+      await loadPermissionsData();
     }
   }
 
@@ -95,6 +174,8 @@
     directoryInfo = null;
     showWarning = false;
     activeTab = "vault";
+    vaultObjects = [];
+    syncStatus = null;
   }
 
   function handleOverlayClick(event: MouseEvent) {
@@ -130,14 +211,21 @@
         <button 
           class="tab-btn" 
           class:active={activeTab === "vault"}
-          onclick={() => activeTab = "vault"}
+          onclick={() => switchTab("vault")}
         >
           Vault
         </button>
         <button 
           class="tab-btn" 
+          class:active={activeTab === "permissions"}
+          onclick={() => switchTab("permissions")}
+        >
+          Permissions
+        </button>
+        <button 
+          class="tab-btn" 
           class:active={activeTab === "general"}
-          onclick={() => activeTab = "general"}
+          onclick={() => switchTab("general")}
         >
           General
         </button>
@@ -207,6 +295,68 @@
                 </button>
               {/if}
             </div>
+          </div>
+        {:else if activeTab === "permissions"}
+          <div class="permissions-settings">
+            <h3>Permission Management</h3>
+            
+            {#if permissionsLoading}
+              <div class="loading">Loading permissions data...</div>
+            {:else}
+              <div class="permissions-stats">
+                <div class="stat-card">
+                  <span class="stat-label">Total Objects</span>
+                  <span class="stat-value">{permissionStats.total}</span>
+                </div>
+                <div class="stat-card">
+                  <span class="stat-label">AI Shared</span>
+                  <span class="stat-value">{permissionStats.aiShared}</span>
+                </div>
+                <div class="stat-card">
+                  <span class="stat-label">Cloud Shared</span>
+                  <span class="stat-value">{permissionStats.cloudShared}</span>
+                </div>
+                <div class="stat-card">
+                  <span class="stat-label">Read Only</span>
+                  <span class="stat-value">{permissionStats.readOnly}</span>
+                </div>
+              </div>
+
+              <div class="objects-list">
+                <h4>Vault Objects ({vaultObjects.length})</h4>
+                
+                {#if vaultObjects.length === 0}
+                  <div class="empty-state">
+                    <p>No objects found in vault. Create some todos or documents to see them here.</p>
+                  </div>
+                {:else}
+                  <div class="objects-grid">
+                    {#each vaultObjects as object}
+                      <div class="object-card">
+                        <div class="object-header">
+                          <span class="object-id">#{object.id}</span>
+                          <span class="object-schema">{object.schema_name}</span>
+                        </div>
+                        <div class="object-path" title={object.file_path}>
+                          {object.file_path}
+                        </div>
+                        <div class="object-dates">
+                          <small>Created: {new Date(object.created_at).toLocaleDateString()}</small>
+                          <small>Updated: {new Date(object.updated_at).toLocaleDateString()}</small>
+                        </div>
+                        
+                        <div class="permission-controls">
+                          <PermissionControls 
+                            objectId={object.id}
+                            bind:permissions={object.permissions}
+                          />
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </div>
         {:else if activeTab === "general"}
           <div class="general-settings">
@@ -450,6 +600,128 @@
   .set-vault-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  /* Permissions Settings Styles */
+  .permissions-settings {
+    padding: 1.5rem;
+  }
+
+  .permissions-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .stat-card {
+    background: #f8fafc;
+    padding: 1rem;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .stat-label {
+    font-size: 0.875rem;
+    color: #64748b;
+    margin-bottom: 0.5rem;
+  }
+
+  .stat-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #1e293b;
+  }
+
+  .objects-list h4 {
+    margin: 0 0 1rem 0;
+    color: #374151;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 2rem;
+    background: #f9fafb;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+  }
+
+  .empty-state p {
+    margin: 0;
+    color: #6b7280;
+    font-size: 0.875rem;
+  }
+
+  .objects-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+    gap: 1rem;
+  }
+
+  .object-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 1rem;
+    transition: box-shadow 0.2s ease;
+  }
+
+  .object-card:hover {
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  }
+
+  .object-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .object-id {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #667eea;
+  }
+
+  .object-schema {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+    background: #e0e7ff;
+    color: #5b21b6;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .object-path {
+    font-size: 0.875rem;
+    color: #6b7280;
+    margin-bottom: 0.5rem;
+    word-break: break-all;
+    max-height: 2.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .object-dates {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+
+  .object-dates small {
+    color: #9ca3af;
+    font-size: 0.75rem;
+  }
+
+  .permission-controls {
+    border-top: 1px solid #e5e7eb;
+    padding-top: 1rem;
   }
 
   .general-settings p {

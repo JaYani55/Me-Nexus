@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 // Import our new modules
@@ -327,118 +327,6 @@ async fn toggle_todo(app: AppHandle, id: u32) -> Result<Vec<Todo>, String> {
     Ok(todos)
 }
 
-// New backend-powered Todo commands
-#[tauri::command]
-async fn load_todos_v2(app: AppHandle) -> Result<Vec<models::AppObject<Todo>>, String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(database) = &app_state.database {
-        let todos = database.load_objects_by_schema("core.todo").await.map_err(|e| e.to_string())?;
-        Ok(todos)
-    } else {
-        Err("Database not initialized. Please configure a vault first.".to_string())
-    }
-}
-
-#[tauri::command]
-async fn add_todo_v2(app: AppHandle, text: String) -> Result<models::AppObject<Todo>, String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(database) = &app_state.database {
-        let todo = Todo::new(text);
-        let object_id = database.save_object(
-            "core.todo",
-            &todo,
-            None, // We could specify a file path here
-            None, // Default permissions
-        ).await.map_err(|e| e.to_string())?;
-        
-        let saved_todo = database.load_object(object_id).await.map_err(|e| e.to_string())?;
-        Ok(saved_todo)
-    } else {
-        Err("Database not initialized. Please configure a vault first.".to_string())
-    }
-}
-
-#[tauri::command]
-async fn update_todo_permissions(
-    app: AppHandle,
-    object_id: i64,
-    permissions: Permissions,
-) -> Result<(), String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(database) = &app_state.database {
-        database.update_object_permissions(object_id, &permissions).await.map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("Database not initialized. Please configure a vault first.".to_string())
-    }
-}
-
-#[tauri::command]
-async fn get_sync_status(app: AppHandle) -> Result<models::SyncStatus, String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(sync_service) = &app_state.sync_service {
-        let service = sync_service.lock().await;
-        let status = service.get_status().await;
-        Ok(status)
-    } else {
-        Err("Sync service not initialized. Please configure a vault first.".to_string())
-    }
-}
-
-#[tauri::command]
-async fn get_all_vault_objects(app: AppHandle) -> Result<Vec<models::AppObject<serde_json::Value>>, String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(database) = &app_state.database {
-        // Get all objects from all schemas
-        let todos: Vec<models::AppObject<serde_json::Value>> = database
-            .load_objects_by_schema("core.todo")
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|obj: models::AppObject<Todo>| models::AppObject {
-                id: obj.id,
-                schema_name: obj.schema_name,
-                content: serde_json::to_value(&obj.content).unwrap_or_default(),
-                permissions: obj.permissions,
-                file_path: obj.file_path,
-                updated_at: obj.updated_at,
-                created_at: obj.created_at,
-            })
-            .collect();
-        
-        Ok(todos)
-    } else {
-        Err("Database not initialized. Please configure a vault first.".to_string())
-    }
-}
-
-#[tauri::command]
-async fn update_object_permissions(
-    app: AppHandle,
-    object_id: i64,
-    permissions: Permissions,
-) -> Result<(), String> {
-    let state = app.state::<Mutex<AppState>>();
-    let app_state = state.lock().await;
-    
-    if let Some(database) = &app_state.database {
-        database.update_object_permissions(object_id, &permissions).await.map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("Database not initialized. Please configure a vault first.".to_string())
-    }
-}
-
 #[tauri::command]
 async fn delete_todo(app: AppHandle, id: u32) -> Result<Vec<Todo>, String> {
     let mut todos = load_todos(app.clone()).await?;
@@ -446,16 +334,6 @@ async fn delete_todo(app: AppHandle, id: u32) -> Result<Vec<Todo>, String> {
     
     save_todos(app, todos.clone()).await?;
     Ok(todos)
-}
-
-// Initialize existing vault on app startup
-async fn initialize_existing_vault(app: &AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(config) = get_vault_config_sync(app)? {
-        log::info!("Found existing vault configuration, initializing...");
-        initialize_vault_backend(app, &config.vault_path).await?;
-        log::info!("Existing vault initialized successfully");
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -466,15 +344,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(AppState::new()))
-        .setup(|app| {
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = initialize_existing_vault(&app_handle).await {
-                    log::error!("Failed to initialize existing vault: {}", e);
-                }
-            });
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             greet,
             get_vault_config,
@@ -485,14 +354,7 @@ pub fn run() {
             save_todos,
             add_todo,
             toggle_todo,
-            delete_todo,
-            // New backend-powered commands
-            load_todos_v2,
-            add_todo_v2,
-            update_todo_permissions,
-            get_sync_status,
-            get_all_vault_objects,
-            update_object_permissions
+            delete_todo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
