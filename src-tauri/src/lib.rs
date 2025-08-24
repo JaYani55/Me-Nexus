@@ -160,50 +160,6 @@ async fn check_directory_info(path: String) -> Result<VaultInfo, String> {
     })
 }
 
-#[tauri::command]
-async fn open_directory_dialog(app: AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    use std::sync::{Arc, Mutex};
-    use tokio::time::{sleep, Duration};
-    
-    // Get the main window
-    let window = app.get_webview_window("main")
-        .ok_or("Failed to get main window".to_string())?;
-    
-    // Create a shared result container
-    let result: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
-    let result_clone = result.clone();
-    
-    // Open folder picker dialog with callback
-    app.dialog()
-        .file()
-        .set_title("Select Vault Directory")
-        .set_parent(&window)
-        .pick_folder(move |folder_path| {
-            let mut guard = result_clone.lock().unwrap();
-            match folder_path {
-                Some(path) => {
-                    let path_str = path.to_string();
-                    *guard = Some(Some(path_str));
-                },
-                None => *guard = Some(None), // User cancelled
-            }
-        });
-    
-    // Wait for the dialog result with timeout
-    for _ in 0..200 { // 10 seconds timeout (50ms * 200)
-        {
-            let guard = result.lock().unwrap();
-            if let Some(path_result) = &*guard {
-                return Ok(path_result.clone());
-            }
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    
-    Err("Dialog timeout - no response from file picker".to_string())
-}
-
 fn create_vault_structure(vault_path: &str) -> Result<(), String> {
     let vault_dir = Path::new(vault_path);
     
@@ -226,6 +182,10 @@ fn create_vault_structure(vault_path: &str) -> Result<(), String> {
     let nexus_dir = vault_dir.join(".nexus");
     fs::create_dir_all(&nexus_dir).map_err(|e| e.to_string())?;
     
+    // Create plugins directory
+    let plugins_dir = vault_dir.join("plugins");
+    fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
+    
     // Create vault info file
     let vault_info_file = nexus_dir.join("vault_info.json");
     let vault_info = serde_json::json!({
@@ -234,6 +194,10 @@ fn create_vault_structure(vault_path: &str) -> Result<(), String> {
         "structure": {
             "Todo": {
                 "type": "todo_manager",
+                "created_at": chrono::Utc::now().to_rfc3339()
+            },
+            "plugins": {
+                "type": "plugin_directory",
                 "created_at": chrono::Utc::now().to_rfc3339()
             }
         }
@@ -581,39 +545,20 @@ async fn test_plugin(app: AppHandle, plugin_id: String) -> Result<PluginStatus, 
     }
 }
 
-fn get_plugins_directory(_app: &AppHandle) -> Result<PathBuf, String> {
-    // In development mode, we need to get the project root directory
-    // In production, we'll use the app's data directory
-    #[cfg(debug_assertions)]
-    {
-        // Development mode: get the project root
-        let current_dir = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+fn get_plugins_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    // Get the current vault configuration to find the vault path
+    if let Some(config) = get_vault_config_sync(app)? {
+        let plugins_path = Path::new(&config.vault_path).join("plugins");
+        log::info!("Using vault plugins directory: {:?}", plugins_path);
         
-        // Navigate to project root - current_dir could be various locations in dev mode
-        let mut project_root = current_dir.clone();
-        
-        // If we're in src-tauri, go up one level
-        if project_root.ends_with("src-tauri") {
-            project_root = project_root.parent().unwrap().to_path_buf();
-        }
-        // If we're in target/debug, go up two levels  
-        else if project_root.ends_with("target/debug") || project_root.ends_with("target\\debug") {
-            project_root = project_root.parent().unwrap().parent().unwrap().to_path_buf();
+        // Ensure the plugins directory exists
+        if let Err(e) = fs::create_dir_all(&plugins_path) {
+            log::warn!("Failed to create plugins directory: {}", e);
         }
         
-        let plugins_path = project_root.join("plugins");
-        log::info!("Development mode: plugins directory resolved to: {:?}", plugins_path);
         Ok(plugins_path)
-    }
-    
-    #[cfg(not(debug_assertions))]
-    {
-        // Production mode: use app's data directory
-        let app_data_dir = _app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("Failed to get app data directory: {}", e))?;
-        Ok(app_data_dir.join("plugins"))
+    } else {
+        Err("No vault configuration found. Please set up a vault first.".to_string())
     }
 }
 
@@ -621,6 +566,135 @@ fn load_plugin_metadata(plugin_json_path: &Path) -> Result<PluginMetadata, Box<d
     let content = fs::read_to_string(plugin_json_path)?;
     let metadata: PluginMetadata = serde_json::from_str(&content)?;
     Ok(metadata)
+}
+
+// Plugin installation commands
+#[tauri::command]
+async fn open_plugin_file_dialog() -> Result<Option<String>, String> {
+    // This will be called from the frontend which will then call install_plugin_from_path
+    Ok(None) // Placeholder - frontend will handle file dialog
+}
+
+#[tauri::command]
+async fn install_plugin_from_path(app: AppHandle, file_path: String) -> Result<String, String> {
+    let plugins_dir = get_plugins_directory(&app)?;
+    
+    // Ensure plugins directory exists
+    if !plugins_dir.exists() {
+        fs::create_dir_all(&plugins_dir).map_err(|e| format!("Failed to create plugins directory: {}", e))?;
+    }
+
+    let archive_path = Path::new(&file_path);
+    if !archive_path.exists() {
+        return Err("File does not exist".to_string());
+    }
+
+    extract_plugin_archive(archive_path, &plugins_dir)?;
+    Ok(format!("Plugin installed from: {}", file_path))
+}
+
+#[tauri::command]
+async fn install_plugin_from_github(app: AppHandle, github_url: String) -> Result<String, String> {
+    use std::process::Command;
+    
+    let plugins_dir = get_plugins_directory(&app)?;
+    
+    // Ensure plugins directory exists
+    if !plugins_dir.exists() {
+        fs::create_dir_all(&plugins_dir).map_err(|e| format!("Failed to create plugins directory: {}", e))?;
+    }
+
+    // Validate GitHub URL
+    if !github_url.starts_with("https://github.com/") && !github_url.starts_with("git@github.com:") {
+        return Err("Invalid GitHub URL. Must start with https://github.com/ or git@github.com:".to_string());
+    }
+
+    // Extract repository name for the folder
+    let repo_name = github_url
+        .split('/')
+        .last()
+        .unwrap_or("unknown-plugin")
+        .replace(".git", "");
+
+    let plugin_path = plugins_dir.join(&repo_name);
+
+    // Clone the repository
+    let output = Command::new("git")
+        .args(&["clone", &github_url, plugin_path.to_str().unwrap()])
+        .output()
+        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+
+    if output.status.success() {
+        // Verify the plugin has the required files
+        let plugin_json = plugin_path.join("plugin.json");
+        if plugin_json.exists() {
+            Ok(format!("Plugin '{}' installed successfully from GitHub", repo_name))
+        } else {
+            // Clean up invalid plugin
+            let _ = fs::remove_dir_all(&plugin_path);
+            Err("Invalid plugin: plugin.json not found in repository".to_string())
+        }
+    } else {
+        Err(format!("Git clone failed: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+#[tauri::command]
+async fn remove_plugin(app: AppHandle, plugin_id: String) -> Result<String, String> {
+    let plugins_dir = get_plugins_directory(&app)?;
+    let plugin_path = plugins_dir.join(&plugin_id);
+
+    if plugin_path.exists() {
+        fs::remove_dir_all(&plugin_path).map_err(|e| format!("Failed to remove plugin: {}", e))?;
+        Ok(format!("Plugin '{}' removed successfully", plugin_id))
+    } else {
+        Err(format!("Plugin '{}' not found", plugin_id))
+    }
+}
+
+fn extract_plugin_archive(archive_path: &Path, plugins_dir: &Path) -> Result<(), String> {
+    use std::process::Command;
+    
+    let extension = archive_path.extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+
+    match extension {
+        "zip" => {
+            // Use built-in zip extraction
+            let file = fs::File::open(archive_path).map_err(|e| format!("Failed to open archive: {}", e))?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+            
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i).map_err(|e| format!("Failed to read zip entry: {}", e))?;
+                let outpath = plugins_dir.join(file.mangled_name());
+
+                if let Some(parent) = outpath.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+                }
+
+                if !file.name().ends_with('/') {
+                    let mut outfile = fs::File::create(&outpath).map_err(|e| format!("Failed to create file: {}", e))?;
+                    std::io::copy(&mut file, &mut outfile).map_err(|e| format!("Failed to extract file: {}", e))?;
+                }
+            }
+            Ok(())
+        }
+        "rar" | "7z" => {
+            // Use 7zip for rar and 7z files
+            let output = Command::new("7z")
+                .args(&["x", archive_path.to_str().unwrap(), &format!("-o{}", plugins_dir.to_str().unwrap())])
+                .output()
+                .map_err(|e| format!("Failed to extract with 7z: {}. Make sure 7-Zip is installed.", e))?;
+
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!("7z extraction failed: {}", String::from_utf8_lossy(&output.stderr)))
+            }
+        }
+        _ => Err(format!("Unsupported archive format: {}", extension))
+    }
 }
 
 // Initialize existing vault on app startup
@@ -639,7 +713,6 @@ pub fn run() {
     
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(AppState::new()))
         .setup(|app| {
@@ -674,7 +747,6 @@ pub fn run() {
             get_vault_config,
             set_vault_path,
             check_directory_info,
-            open_directory_dialog,
             load_todos,
             save_todos,
             add_todo,
@@ -691,7 +763,11 @@ pub fn run() {
             ping_plugins,
             get_plugin_info,
             discover_plugins,
-            test_plugin
+            test_plugin,
+            open_plugin_file_dialog,
+            install_plugin_from_path,
+            install_plugin_from_github,
+            remove_plugin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

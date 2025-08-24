@@ -99,6 +99,12 @@
   let pluginStatuses = $state<Map<string, PluginStatus>>(new Map());
   let pluginsLoading = $state(false);
   let testingPlugin = $state<string | null>(null);
+  
+  // Plugin installation state
+  let installingPlugin = $state(false);
+  let githubRepo = $state("");
+  let installationMessage = $state("");
+  let installationError = $state(false);
 
   // Load current vault config when modal opens
   $effect(() => {
@@ -195,6 +201,68 @@
       case "active": return "#28a745";
       case "error": return "#dc3545";
       default: return "#6c757d";
+    }
+  }
+
+  // Plugin installation functions
+  async function selectPluginFile() {
+    try {
+      installingPlugin = true;
+      installationMessage = "";
+      installationError = false;
+      
+      // For now, we'll use a simple prompt approach
+      // In a real implementation, you'd integrate with Tauri's file dialog
+      const filePath = prompt("Enter the full path to the plugin ZIP file:");
+      if (!filePath) {
+        installingPlugin = false;
+        return;
+      }
+      
+      const result = await invoke<string>("install_plugin_from_path", { 
+        filePath: filePath.trim() 
+      });
+      
+      installationMessage = result;
+      installationError = false;
+      
+      // Reload plugins list
+      await loadPluginsData();
+    } catch (error) {
+      installationMessage = error?.toString() || "Failed to install plugin";
+      installationError = true;
+      console.error("Failed to install plugin from file:", error);
+    } finally {
+      installingPlugin = false;
+    }
+  }
+
+  async function installFromGitHub() {
+    if (!githubRepo.trim()) return;
+    
+    try {
+      installingPlugin = true;
+      installationMessage = "";
+      installationError = false;
+      
+      const result = await invoke<string>("install_plugin_from_github", { 
+        repoUrl: githubRepo.trim() 
+      });
+      
+      installationMessage = result;
+      installationError = false;
+      
+      // Reload plugins list
+      await loadPluginsData();
+      
+      // Clear the input
+      githubRepo = "";
+    } catch (error) {
+      installationMessage = error?.toString() || "Failed to install plugin from GitHub";
+      installationError = true;
+      console.error("Failed to install plugin from GitHub:", error);
+    } finally {
+      installingPlugin = false;
     }
   }
 
@@ -530,6 +598,51 @@
                 {/each}
               </div>
             {/if}
+            
+            <!-- Plugin Installation Section -->
+            <div class="plugin-installation">
+              <h4>Install New Plugin</h4>
+              
+              <div class="install-methods">
+                <div class="install-method">
+                  <h5>Install from File</h5>
+                  <p>Install a plugin from a local ZIP archive</p>
+                  <button 
+                    class="install-btn"
+                    onclick={selectPluginFile}
+                    disabled={installingPlugin}
+                  >
+                    {installingPlugin ? "Installing..." : "Choose Plugin File"}
+                  </button>
+                </div>
+                
+                <div class="install-method">
+                  <h5>Install from GitHub</h5>
+                  <p>Install a plugin directly from a GitHub repository</p>
+                  <div class="github-install">
+                    <input 
+                      type="text" 
+                      placeholder="owner/repository"
+                      bind:value={githubRepo}
+                      disabled={installingPlugin}
+                    />
+                    <button 
+                      class="install-btn"
+                      onclick={installFromGitHub}
+                      disabled={installingPlugin || !githubRepo.trim()}
+                    >
+                      {installingPlugin ? "Installing..." : "Install"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
+              {#if installationMessage}
+                <div class="installation-message" class:error={installationError}>
+                  {installationMessage}
+                </div>
+              {/if}
+            </div>
           </div>
         {:else if activeTab === "general"}
           <div class="general-settings">
@@ -1094,5 +1207,112 @@
   .plugin-last-ping {
     font-size: 0.875rem;
     color: #6c757d;
+  }
+
+  /* Plugin Installation Styles */
+  .plugin-installation {
+    margin-top: 2rem;
+    padding: 1.5rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 1px solid #dee2e6;
+  }
+
+  .plugin-installation h4 {
+    margin: 0 0 1rem 0;
+    color: #495057;
+  }
+
+  .install-methods {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .install-method {
+    padding: 1rem;
+    background: white;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+  }
+
+  .install-method h5 {
+    margin: 0 0 0.5rem 0;
+    color: #212529;
+    font-size: 1rem;
+  }
+
+  .install-method p {
+    margin: 0 0 1rem 0;
+    color: #6c757d;
+    font-size: 0.875rem;
+  }
+
+  .install-btn {
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background-color 0.2s;
+    width: 100%;
+  }
+
+  .install-btn:hover:not(:disabled) {
+    background: #218838;
+  }
+
+  .install-btn:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+  }
+
+  .github-install {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .github-install input {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 0.875rem;
+  }
+
+  .github-install input:focus {
+    outline: none;
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+  }
+
+  .github-install .install-btn {
+    width: auto;
+    min-width: 80px;
+  }
+
+  .installation-message {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    border-radius: 4px;
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    font-size: 0.875rem;
+  }
+
+  .installation-message.error {
+    background: #f8d7da;
+    color: #721c24;
+    border-color: #f5c6cb;
+  }
+
+  @media (max-width: 768px) {
+    .install-methods {
+      grid-template-columns: 1fr;
+    }
   }
 </style>
