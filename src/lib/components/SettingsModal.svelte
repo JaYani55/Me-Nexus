@@ -39,12 +39,44 @@
     errors: string[];
   }
 
+  interface PluginMetadata {
+    name: string;
+    id: string;
+    version: string;
+    description: string;
+    author: string;
+    main: string;
+    permissions: {
+      network: boolean;
+      filesystem: boolean;
+      system: boolean;
+    };
+    capabilities: string[];
+    category: string;
+    tags: string[];
+  }
+
+  interface InstalledPlugin {
+    metadata: PluginMetadata;
+    path: string;
+    enabled: boolean;
+    installed_at: string;
+    last_used: string | null;
+  }
+
+  interface PluginStatus {
+    plugin_id: string;
+    status: string;
+    last_ping: string | null;
+    error_message: string | null;
+  }
+
   let { isOpen = $bindable(), onVaultChanged } = $props<{
     isOpen: boolean;
     onVaultChanged?: () => void;
   }>();
 
-  let activeTab = $state<"vault" | "permissions" | "general">("vault");
+  let activeTab = $state<"vault" | "permissions" | "plugins" | "general">("vault");
   let currentVault = $state<VaultConfig | null>(null);
   let isLoading = $state(false);
   let selectedPath = $state("");
@@ -61,6 +93,12 @@
     cloudShared: 0,
     readOnly: 0
   });
+
+  // Plugins tab state
+  let installedPlugins = $state<InstalledPlugin[]>([]);
+  let pluginStatuses = $state<Map<string, PluginStatus>>(new Map());
+  let pluginsLoading = $state(false);
+  let testingPlugin = $state<string | null>(null);
 
   // Load current vault config when modal opens
   $effect(() => {
@@ -114,11 +152,59 @@
     };
   }
 
-  async function switchTab(newTab: "vault" | "permissions" | "general") {
+  async function loadPluginsData() {
+    try {
+      pluginsLoading = true;
+      const plugins = await invoke<InstalledPlugin[]>("discover_plugins");
+      installedPlugins = plugins;
+    } catch (error) {
+      console.error("Failed to load plugins:", error);
+    } finally {
+      pluginsLoading = false;
+    }
+  }
+
+  async function testPlugin(pluginId: string) {
+    try {
+      testingPlugin = pluginId;
+      const status = await invoke<PluginStatus>("test_plugin", { pluginId });
+      pluginStatuses.set(pluginId, status);
+      // Force reactivity update
+      pluginStatuses = new Map(pluginStatuses);
+    } catch (error) {
+      console.error("Failed to test plugin:", error);
+      pluginStatuses.set(pluginId, {
+        plugin_id: pluginId,
+        status: "error",
+        last_ping: new Date().toISOString(),
+        error_message: error?.toString() || "Unknown error"
+      });
+      pluginStatuses = new Map(pluginStatuses);
+    } finally {
+      testingPlugin = null;
+    }
+  }
+
+  function formatTimestamp(timestamp: string | null): string {
+    if (!timestamp) return "Never";
+    return new Date(timestamp).toLocaleString();
+  }
+
+  function getStatusColor(status: string): string {
+    switch (status) {
+      case "active": return "#28a745";
+      case "error": return "#dc3545";
+      default: return "#6c757d";
+    }
+  }
+
+  async function switchTab(newTab: "vault" | "permissions" | "plugins" | "general") {
     activeTab = newTab;
     
     if (newTab === "permissions" && currentVault && vaultObjects.length === 0) {
       await loadPermissionsData();
+    } else if (newTab === "plugins" && installedPlugins.length === 0) {
+      await loadPluginsData();
     }
   }
 
@@ -221,6 +307,13 @@
           onclick={() => switchTab("permissions")}
         >
           Permissions
+        </button>
+        <button 
+          class="tab-btn" 
+          class:active={activeTab === "plugins"}
+          onclick={() => switchTab("plugins")}
+        >
+          Plugins
         </button>
         <button 
           class="tab-btn" 
@@ -355,6 +448,86 @@
                     {/each}
                   </div>
                 {/if}
+              </div>
+            {/if}
+          </div>
+        {:else if activeTab === "plugins"}
+          <div class="plugins-settings">
+            <h3>Plugin Management</h3>
+            
+            {#if pluginsLoading}
+              <div class="loading">Loading plugins...</div>
+            {:else if installedPlugins.length === 0}
+              <div class="no-plugins">
+                <p>No plugins found. To install plugins, place them in the plugins directory:</p>
+                <code>plugins/</code>
+                <p>Each plugin should have a <code>plugin.json</code> configuration file.</p>
+              </div>
+            {:else}
+              <div class="plugins-list">
+                <h4>Installed Plugins ({installedPlugins.length})</h4>
+                
+                {#each installedPlugins as plugin (plugin.metadata.id)}
+                  {@const status = pluginStatuses.get(plugin.metadata.id)}
+                  <div class="plugin-card">
+                    <div class="plugin-header">
+                      <div class="plugin-info">
+                        <h5>{plugin.metadata.name}</h5>
+                        <span class="plugin-version">v{plugin.metadata.version}</span>
+                        {#if status}
+                          <span 
+                            class="plugin-status" 
+                            style="color: {getStatusColor(status.status)}"
+                          >
+                            {status.status}
+                          </span>
+                        {/if}
+                      </div>
+                      <div class="plugin-actions">
+                        <button 
+                          class="test-plugin-btn"
+                          onclick={() => testPlugin(plugin.metadata.id)}
+                          disabled={testingPlugin === plugin.metadata.id}
+                        >
+                          {testingPlugin === plugin.metadata.id ? "Testing..." : "Test"}
+                        </button>
+                      </div>
+                    </div>
+                    
+                    <div class="plugin-details">
+                      <p class="plugin-description">{plugin.metadata.description}</p>
+                      <div class="plugin-meta">
+                        <span><strong>Author:</strong> {plugin.metadata.author}</span>
+                        <span><strong>Category:</strong> {plugin.metadata.category}</span>
+                        <span><strong>Installed:</strong> {formatTimestamp(plugin.installed_at)}</span>
+                        {#if plugin.last_used}
+                          <span><strong>Last Used:</strong> {formatTimestamp(plugin.last_used)}</span>
+                        {/if}
+                      </div>
+                      
+                      {#if plugin.metadata.capabilities.length > 0}
+                        <div class="plugin-capabilities">
+                          <strong>Capabilities:</strong>
+                          {#each plugin.metadata.capabilities as capability}
+                            <span class="capability-tag">{capability}</span>
+                          {/each}
+                        </div>
+                      {/if}
+                      
+                      {#if status && status.error_message}
+                        <div class="plugin-error">
+                          <strong>Error:</strong> {status.error_message}
+                        </div>
+                      {/if}
+                      
+                      {#if status && status.last_ping}
+                        <div class="plugin-last-ping">
+                          <strong>Last Ping:</strong> {formatTimestamp(status.last_ping)}
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
               </div>
             {/if}
           </div>
@@ -784,5 +957,142 @@
       border-color: #4b5563;
       color: #f9fafb;
     }
+  }
+
+  /* Plugin Settings Styles */
+  .plugins-settings {
+    padding: 1rem;
+  }
+
+  .no-plugins {
+    text-align: center;
+    color: #6c757d;
+    padding: 2rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    border: 2px dashed #dee2e6;
+  }
+
+  .no-plugins code {
+    background: #e9ecef;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+
+  .plugins-list h4 {
+    margin-bottom: 1rem;
+    color: #495057;
+  }
+
+  .plugin-card {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background: #fff;
+  }
+
+  .plugin-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 0.75rem;
+  }
+
+  .plugin-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .plugin-info h5 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: #212529;
+  }
+
+  .plugin-version {
+    background: #e9ecef;
+    color: #495057;
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .plugin-status {
+    font-weight: 500;
+    font-size: 0.875rem;
+  }
+
+  .test-plugin-btn {
+    background: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 0.375rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background-color 0.2s;
+  }
+
+  .test-plugin-btn:hover:not(:disabled) {
+    background: #0056b3;
+  }
+
+  .test-plugin-btn:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+  }
+
+  .plugin-details {
+    border-top: 1px solid #f1f3f4;
+    padding-top: 0.75rem;
+  }
+
+  .plugin-description {
+    margin: 0 0 0.75rem 0;
+    color: #495057;
+    line-height: 1.4;
+  }
+
+  .plugin-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.875rem;
+    color: #6c757d;
+  }
+
+  .plugin-capabilities {
+    margin-bottom: 0.75rem;
+    font-size: 0.875rem;
+  }
+
+  .capability-tag {
+    display: inline-block;
+    background: #e7f3ff;
+    color: #0066cc;
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    margin-right: 0.5rem;
+    margin-top: 0.25rem;
+  }
+
+  .plugin-error {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 0.5rem;
+    border-radius: 4px;
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+  }
+
+  .plugin-last-ping {
+    font-size: 0.875rem;
+    color: #6c757d;
   }
 </style>

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Plugin Test</title>
+    <script type="module">
+        import { invoke } from '@tauri-apps/api/core';
+        
+        window.testPlugins = async function() {
+            try {
+                console.log('Testing plugin discovery...');
+                const plugins = await invoke('discover_plugins');
+                console.log('Discovered plugins:', plugins);
+                
+                console.log('Testing plugin functionality...');
+                const testResult = await invoke('test_plugin', { pluginId: 'test-plugin' });
+                console.log('Plugin test result:', testResult);
+                
+                return { plugins, testResult };
+            } catch (error) {
+                console.error('Error testing plugins:', error);
+                return { error: error.toString() };
+            }
+        };
+        
+        // Auto-run test when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                window.testPlugins().then(result => {
+                    document.getElementById('result').innerHTML = `
+                        <h3>Plugin Test Results:</h3>
+                        <pre>${JSON.stringify(result, null, 2)}</pre>
+                    `;
+                });
+            }, 1000);
+        });
+    </script>
+</head>
+<body>
+    <h1>Plugin System Test</h1>
+    <div id="result">Loading...</div>
+    <button onclick="testPlugins()">Test Again</button>
+</body>
+</html>

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
+use std::collections::HashMap;
 
 // Core data structures
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -174,4 +175,43 @@ impl DataObject {
             created_at: now,
         }
     }
+}
+
+// Plugin system structures
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginMetadata {
+    pub name: String,
+    pub id: String,
+    pub version: String,
+    pub description: String,
+    pub author: String,
+    pub main: String,
+    pub permissions: PluginPermissions,
+    pub capabilities: Vec<String>,
+    pub category: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginPermissions {
+    pub network: bool,
+    pub filesystem: bool,
+    pub system: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct InstalledPlugin {
+    pub metadata: PluginMetadata,
+    pub path: String,
+    pub enabled: bool,
+    pub installed_at: String,
+    pub last_used: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginStatus {
+    pub plugin_id: String,
+    pub status: String, // "active", "inactive", "error"
+    pub last_ping: Option<String>,
+    pub error_message: Option<String>,
 }

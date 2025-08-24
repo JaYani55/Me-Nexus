@@ -10,13 +10,15 @@ mod error;
 mod models;
 mod database;
 mod sync_service;
+mod sidecar;
 
-use models::{VaultConfig, VaultInfo, Todo, Permissions};
+use models::{VaultConfig, VaultInfo, Todo, Permissions, PluginMetadata, InstalledPlugin, PluginStatus};
 
 // Application state for managing the database and sync service
 pub struct AppState {
     database: Option<Arc<database::Database>>,
     sync_service: Option<Arc<Mutex<sync_service::SyncService>>>,
+    sidecar_manager: Option<Arc<sidecar::SidecarManager>>,
 }
 
 impl AppState {
@@ -24,6 +26,7 @@ impl AppState {
         Self {
             database: None,
             sync_service: None,
+            sidecar_manager: None,
         }
     }
 }
@@ -448,6 +451,178 @@ async fn delete_todo(app: AppHandle, id: u32) -> Result<Vec<Todo>, String> {
     Ok(todos)
 }
 
+// Plugin system test command
+#[tauri::command]
+async fn ping_plugins(app: AppHandle) -> Result<String, String> {
+    let state = app.state::<Mutex<AppState>>();
+    let app_state = state.lock().await;
+    
+    if let Some(ref manager) = app_state.sidecar_manager {
+        match manager.send_request("ping".to_string(), serde_json::Value::Null).await {
+            Ok(response) => {
+                if let Some(error) = response.error {
+                    Err(format!("Sidecar error: {}", error))
+                } else if let Some(result) = response.result {
+                    Ok(format!("Plugin response: {}", result))
+                } else {
+                    Ok("Plugin responded successfully".to_string())
+                }
+            }
+            Err(e) => Err(format!("Failed to communicate with plugins: {}", e))
+        }
+    } else {
+        Err("Plugin system not initialized".to_string())
+    }
+}
+
+// Get plugin manager information
+#[tauri::command]
+async fn get_plugin_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let state = app.state::<Mutex<AppState>>();
+    let app_state = state.lock().await;
+    
+    if let Some(ref manager) = app_state.sidecar_manager {
+        match manager.send_request("get_info".to_string(), serde_json::Value::Null).await {
+            Ok(response) => {
+                if let Some(error) = response.error {
+                    Err(format!("Sidecar error: {}", error))
+                } else if let Some(result) = response.result {
+                    Ok(result)
+                } else {
+                    Err("No result from plugin manager".to_string())
+                }
+            }
+            Err(e) => Err(format!("Failed to communicate with plugins: {}", e))
+        }
+    } else {
+        Err("Plugin system not initialized".to_string())
+    }
+}
+
+// Plugin management commands
+#[tauri::command]
+async fn discover_plugins(app: AppHandle) -> Result<Vec<InstalledPlugin>, String> {
+    let plugins_dir = get_plugins_directory(&app)?;
+    log::info!("Looking for plugins in directory: {:?}", plugins_dir);
+    let mut plugins = Vec::new();
+
+    if !plugins_dir.exists() {
+        log::info!("Plugins directory does not exist, creating it: {:?}", plugins_dir);
+        fs::create_dir_all(&plugins_dir).map_err(|e| format!("Failed to create plugins directory: {}", e))?;
+        return Ok(plugins);
+    }
+
+    let entries = fs::read_dir(&plugins_dir).map_err(|e| format!("Failed to read plugins directory: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        log::info!("Checking path: {:?}", path);
+
+        if path.is_dir() {
+            let plugin_json_path = path.join("plugin.json");
+            if plugin_json_path.exists() {
+                match load_plugin_metadata(&plugin_json_path) {
+                    Ok(metadata) => {
+                        let plugin = InstalledPlugin {
+                            metadata,
+                            path: path.to_string_lossy().to_string(),
+                            enabled: true, // Default to enabled
+                            installed_at: chrono::Utc::now().to_rfc3339(),
+                            last_used: None,
+                        };
+                        plugins.push(plugin);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load plugin metadata from {:?}: {}", plugin_json_path, e);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(plugins)
+}
+
+#[tauri::command]
+async fn test_plugin(app: AppHandle, plugin_id: String) -> Result<PluginStatus, String> {
+    let state = app.state::<Mutex<AppState>>();
+    let app_state = state.lock().await;
+    
+    if let Some(ref manager) = app_state.sidecar_manager {
+        let params = serde_json::json!({ "plugin_id": plugin_id });
+        match manager.send_request("test_plugin".to_string(), params).await {
+            Ok(response) => {
+                if let Some(error) = response.error {
+                    Ok(PluginStatus {
+                        plugin_id: plugin_id.clone(),
+                        status: "error".to_string(),
+                        last_ping: Some(chrono::Utc::now().to_rfc3339()),
+                        error_message: Some(error),
+                    })
+                } else {
+                    Ok(PluginStatus {
+                        plugin_id: plugin_id.clone(),
+                        status: "active".to_string(),
+                        last_ping: Some(chrono::Utc::now().to_rfc3339()),
+                        error_message: None,
+                    })
+                }
+            }
+            Err(e) => Ok(PluginStatus {
+                plugin_id: plugin_id.clone(),
+                status: "error".to_string(),
+                last_ping: Some(chrono::Utc::now().to_rfc3339()),
+                error_message: Some(e.to_string()),
+            })
+        }
+    } else {
+        Err("Plugin system not initialized".to_string())
+    }
+}
+
+fn get_plugins_directory(_app: &AppHandle) -> Result<PathBuf, String> {
+    // In development mode, we need to get the project root directory
+    // In production, we'll use the app's data directory
+    #[cfg(debug_assertions)]
+    {
+        // Development mode: get the project root
+        let current_dir = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+        
+        // Navigate to project root - current_dir could be various locations in dev mode
+        let mut project_root = current_dir.clone();
+        
+        // If we're in src-tauri, go up one level
+        if project_root.ends_with("src-tauri") {
+            project_root = project_root.parent().unwrap().to_path_buf();
+        }
+        // If we're in target/debug, go up two levels  
+        else if project_root.ends_with("target/debug") || project_root.ends_with("target\\debug") {
+            project_root = project_root.parent().unwrap().parent().unwrap().to_path_buf();
+        }
+        
+        let plugins_path = project_root.join("plugins");
+        log::info!("Development mode: plugins directory resolved to: {:?}", plugins_path);
+        Ok(plugins_path)
+    }
+    
+    #[cfg(not(debug_assertions))]
+    {
+        // Production mode: use app's data directory
+        let app_data_dir = _app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+        Ok(app_data_dir.join("plugins"))
+    }
+}
+
+fn load_plugin_metadata(plugin_json_path: &Path) -> Result<PluginMetadata, Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(plugin_json_path)?;
+    let metadata: PluginMetadata = serde_json::from_str(&content)?;
+    Ok(metadata)
+}
+
 // Initialize existing vault on app startup
 async fn initialize_existing_vault(app: &AppHandle) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(config) = get_vault_config_sync(app)? {
@@ -465,14 +640,33 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .manage(Mutex::new(AppState::new()))
         .setup(|app| {
             let app_handle = app.handle().clone();
+            let app_handle_clone = app_handle.clone();
+            
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = initialize_existing_vault(&app_handle).await {
                     log::error!("Failed to initialize existing vault: {}", e);
                 }
             });
+
+            // Initialize the sidecar manager
+            tauri::async_runtime::spawn(async move {
+                match sidecar::SidecarManager::new(app_handle_clone.clone()).await {
+                    Ok(manager) => {
+                        let state = app_handle_clone.state::<Mutex<AppState>>();
+                        let mut app_state = state.lock().await;
+                        app_state.sidecar_manager = Some(Arc::new(manager));
+                        log::info!("Sidecar manager initialized successfully");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to initialize sidecar manager: {}", e);
+                    }
+                }
+            });
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -492,7 +686,12 @@ pub fn run() {
             update_todo_permissions,
             get_sync_status,
             get_all_vault_objects,
-            update_object_permissions
+            update_object_permissions,
+            // Plugin system commands
+            ping_plugins,
+            get_plugin_info,
+            discover_plugins,
+            test_plugin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -5,6 +5,7 @@ A modern, vault-based todo application built with Tauri and Svelte 5. Organize y
 ## ✨ Features
 
 - **Vault System**: Choose any folder as your data vault (similar to Obsidian)
+- **Plugin System**: Extensible architecture with secure Deno-based plugins
 - **Modern UI**: Built with Svelte 5 runes and responsive design
 - **Cross-Platform**: Native desktop app for Windows, macOS, and Linux
 - **Local Storage**: All data stored locally in JSON files within your vault
@@ -65,7 +66,11 @@ me-nexus/
 │   └── lib/components/    # Reusable components
 ├── src-tauri/             # Rust backend
 │   ├── src/               # Rust source code
+│   ├── sidecars/          # Deno plugin manager
 │   └── Cargo.toml         # Rust dependencies
+├── plugins/               # Plugin directory
+│   └── test-plugin/       # Example plugin
+├── docs/                  # Documentation
 └── static/                # Static assets
 ```
 
@@ -77,6 +82,83 @@ me-nexus/
 4. **Settings**: Change vault location anytime via settings menu
 
 Your todos are saved as `todos.json` in your vault's `/ToDo` folder.
+
+## 🔌 Plugin Development
+
+Me-Nexus supports a powerful plugin system built on Deno for secure, extensible functionality.
+
+### Quick Plugin Creation
+
+1. **Create Plugin Directory**
+   ```
+   plugins/my-plugin/
+   ├── plugin.json    # Plugin metadata
+   ├── index.ts       # Plugin implementation
+   └── README.md      # Documentation
+   ```
+
+2. **Define Plugin Metadata** (`plugin.json`)
+   ```json
+   {
+     "name": "My Plugin",
+     "id": "my-plugin",
+     "version": "1.0.0",
+     "description": "A simple example plugin",
+     "author": "Your Name",
+     "main": "index.ts",
+     "permissions": {
+       "network": false,
+       "filesystem": false,
+       "system": false
+     },
+     "capabilities": ["ping", "custom_action"],
+     "category": "utility"
+   }
+   ```
+
+3. **Implement Plugin Logic** (`index.ts`)
+   ```typescript
+   interface PluginAPI {
+     ping(): Promise<string>;
+     getInfo(): Promise<any>;
+   }
+
+   class MyPlugin implements PluginAPI {
+     async ping(): Promise<string> {
+       return "pong";
+     }
+
+     async getInfo(): Promise<any> {
+       return {
+         name: "My Plugin",
+         version: "1.0.0",
+         status: "active"
+       };
+     }
+
+     async customAction(params: any): Promise<any> {
+       // Your custom logic here
+       return { success: true, message: "Hello from my plugin!" };
+     }
+   }
+
+   export default new MyPlugin();
+   ```
+
+### Plugin Installation
+
+1. **Development**: Place plugin folder in `plugins/` directory
+2. **Test Plugin**: Open Settings → Plugins tab, click "Test" on your plugin
+3. **Production**: Copy plugin to app's data directory `plugins/` folder
+
+### Plugin Management
+
+- **Discover Plugins**: Settings → Plugins tab shows all installed plugins
+- **Test Functionality**: Built-in testing validates plugin communication
+- **Security**: Sandboxed execution with configurable permissions
+- **Hot Reload**: Code changes picked up without restart (in development)
+
+For detailed plugin development documentation, see [`docs/plugin_sidecar.md`](docs/plugin_sidecar.md).
 
 ## 📄 License
 

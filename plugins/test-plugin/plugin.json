@@ -1,0 +1,19 @@
+{
+  "name": "Test Plugin",
+  "id": "test-plugin",
+  "version": "1.0.0",
+  "description": "A simple test plugin to verify the plugin system is working correctly",
+  "author": "Me-Nexus Team",
+  "main": "index.ts",
+  "permissions": {
+    "network": false,
+    "filesystem": false,
+    "system": false
+  },
+  "capabilities": [
+    "ping",
+    "status"
+  ],
+  "category": "utility",
+  "tags": ["test", "development", "verification"]
+}

@@ -7,6 +7,22 @@
     "core:default",
     "opener:default",
     "core:path:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "deno",
+          "cmd": "deno",
+          "args": ["run", "--allow-read", "--allow-net", "sidecars/plugin_manager.ts"]
+        },
+        {
+          "name": "deno-full-path",
+          "cmd": "{USERPROFILE}\\.deno\\bin\\deno.exe",
+          "args": ["run", "--allow-read", "--allow-net", "sidecars/plugin_manager.ts"]
+        }
+      ]
+    },
+    "shell:allow-stdin-write"
   ]
 }
